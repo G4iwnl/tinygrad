@@ -2,18 +2,19 @@ from typing import cast, Generator
 import time, pprint
 from dataclasses import dataclass, replace, field
 from tinygrad.helpers import all_same, colored, DEBUG, GlobalCounters, ansilen, BEAM, NOOPT, all_int, CAPTURING, Metadata, TRACEMETA, TracingKey
-from tinygrad.helpers import DEVECTORIZE, time_to_str, VALIDATE_WITH_CPU, getenv, cpu_profile
-from tinygrad.uop.ops import Ops, PatternMatcher, UOp, UPat, Variable, sym_infer, graph_rewrite, print_uops, track_rewrites, KernelInfo
+from tinygrad.helpers import DEVECTORIZE, time_to_str, VALIDATE_WITH_CPU, getenv
+from tinygrad.uop.ops import Ops, PatternMatcher, UOp, UPat, Variable, sym_infer, graph_rewrite, print_uops, track_rewrites
 from tinygrad.device import Device, Buffer
 from tinygrad.renderer import Renderer, ProgramSpec, Estimates
 from tinygrad.engine.schedule import ScheduleItem
+from tinygrad.opt import get_optimized_ast
 from tinygrad.codegen import full_rewrite
-from tinygrad.opt.kernel import Opt
+from tinygrad.uop.spec import type_verify
 
 # **************** Program Creation ****************
 
-@track_rewrites(name=lambda _ast,_renderer,ret: TracingKey(ret.name, (ret.function_name, ret.ast), ret=ret))
-def get_program(ast:UOp, renderer:Renderer|None=None, opts:list[Opt]|None=None) -> ProgramSpec:
+@track_rewrites(name=lambda _ast,_renderer,ret: TracingKey(ret.name, (ret.function_name, ret.ast), ret.src, ret=ret))
+def get_program(ast:UOp, renderer:Renderer) -> ProgramSpec:
   """
   Transform an AST into a ProgramSpec. May trigger BEAM search.
 
@@ -26,17 +27,16 @@ def get_program(ast:UOp, renderer:Renderer|None=None, opts:list[Opt]|None=None) 
   """
 
   if getenv("VIZ"): graph_rewrite(ast, PatternMatcher([]), name="View Base AST")
+  modified_ast = get_optimized_ast(ast, renderer) if ast.arg is None or ast.arg.opts_to_apply is not None else ast
+  if __debug__: type_verify(list(modified_ast.toposort()))
 
   # linearize
-  if renderer is None: renderer = Device.default.renderer
-  if opts is not None:
-    assert ast.arg is None, "can't apply opts if sink has an arg"
-    ast = ast.replace(arg=KernelInfo(opts_to_apply=tuple(opts)))
   try:
-    uops = full_rewrite(ast, renderer)
+    uops = full_rewrite(modified_ast, renderer)
   except RuntimeError:
     print("***** LINEARIZE FAILURE *****")
     print(f"ast = {ast}")
+    print(f"opts = {modified_ast.arg.applied_opts}")
     raise
   assert uops[-1].op is Ops.SINK, "last uop must be sink"
 
@@ -44,7 +44,7 @@ def get_program(ast:UOp, renderer:Renderer|None=None, opts:list[Opt]|None=None) 
   if DEBUG >= 6: print_uops(uops)
   src = renderer.render(uops)
 
-  return ProgramSpec(uops[-1].arg.name if uops[-1].arg is not None else "test", src, renderer.device, ast, uops,
+  return ProgramSpec(uops[-1].arg.name, src, renderer.device, ast, uops,
                      global_size=[1,1,1] if renderer.has_local else None, local_size=[1,1,1] if renderer.has_local else None)
 
 # **************** Runners ****************
@@ -63,10 +63,7 @@ class CompiledRunner(Runner):
   def __init__(self, p:ProgramSpec, precompiled:bytes|None=None, prg=None):
     if DEBUG >= 4: print(p.src)
     self.p:ProgramSpec = p
-    if precompiled is not None: self.lib = precompiled
-    else:
-      with cpu_profile(TracingKey(f"compile {p.name}", (p.function_name,), cat="compiler"), "TINY"):
-        self.lib = Device[p.device].compiler.compile_cached(p.src)
+    self.lib:bytes = precompiled if precompiled is not None else Device[p.device].compiler.compile_cached(p.src)
     if DEBUG >= 7: Device[p.device].compiler.disassemble(self.lib)
     self._prg = Device[p.device].runtime(p.function_name, self.lib) if prg is None else prg
     super().__init__(p.name, p.device, p.estimates)
@@ -159,7 +156,7 @@ class ExecItem:
         lds_est = sym_infer(self.prg.estimates.lds, var_vals)
         mem_est = min(mem_est, lds_est)   # there can't be more memory accessed than loads/stores. remove this when symbolic is fixed
         ptm = colored(time_to_str(et, w=9), "yellow" if et > 0.01 else None) if et is not None else ""
-        print(f"{colored(f'*** {self.prg.device[:7]:7s} {GlobalCounters.kernel_count:4d}', 'magenta' if jit else ('green' if self.prg.first_run else None))} {self.prg.display_name+' '*(44-ansilen(self.prg.display_name))} arg {len(bufs):2d} mem {GlobalCounters.mem_used/1e9:5.2f} GB " +  # noqa: E501
+        print(f"{colored(f'*** {self.prg.device[:7]:7s} {GlobalCounters.kernel_count:4d}', 'magenta' if jit else ('green' if self.prg.first_run else None))} {self.prg.display_name+' '*(41-ansilen(self.prg.display_name))} arg {len(bufs):2d} mem {GlobalCounters.mem_used/1e9:5.2f} GB " +  # noqa: E501
               (str() if et is None else f"tm {ptm}/{GlobalCounters.time_sum_s*1e3:9.2f}ms ({op_est/((et or 1e-20)*1e9):9.2f} GFLOPS {mem_est/((et or 1e-20)*1e9):6.1f}|{lds_est/((et or 1e-20)*1e9):<7.1f} GB/s)" +  # noqa: E501
                f" {[repr(m) if TRACEMETA >= 2 else str(m) for m in self.metadata] if self.metadata else ''}"))
       self.prg.first_run = False

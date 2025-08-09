@@ -282,7 +282,7 @@ class Tensor(MathTrait):
     # TODO: this is a hack for writing to DISK. remove with working assign
     if isinstance(self.device, str) and self.device.startswith("DISK"):
       if x.__class__ is not Tensor: x = Tensor(x, device="CPU", dtype=self.dtype)
-      self._buffer().copyin(x._data())
+      cast(Buffer, self.contiguous().realize().uop.base.buffer).ensure_allocated().copyin(x._data())
       return self
     if x.__class__ is not Tensor: x = Tensor(x, device=self.device, dtype=self.dtype)
     if self.uop is x.uop: return self  # a self assign is a NOOP
@@ -299,10 +299,7 @@ class Tensor(MathTrait):
     """
     return Tensor(self.uop.detach(), device=self.device, requires_grad=False)
 
-  def _buffer(self) -> Buffer:
-    x = self.cast(self.dtype.base).contiguous()
-    if isinstance(self.device, tuple): x = x.to("CPU")
-    return cast(Buffer, x.realize().uop.base.buffer).ensure_allocated()
+  def _buffer(self) -> Buffer: return cast(Buffer, self.cast(self.dtype.base).contiguous().to("CPU").realize().uop.base.buffer)
   def _data(self) -> memoryview: return self._buffer().as_buffer()
 
   def data(self) -> memoryview:
@@ -2234,7 +2231,7 @@ class Tensor(MathTrait):
     """
     def parse_formula(formula:str, *operands:Tensor):
       if "..." in (formula := formula.replace(" ", "")):
-        ell_chars, ell_longest = "".join(c for c in string.ascii_letters if c not in formula), 0
+        ell_chars, ell_longest = "".join(set(string.ascii_letters) - set(formula)), 0
         for i, inp in enumerate(filter(lambda x: "..." in x, inputs := formula.split("->")[0].split(","))):
           if (ell_count := max(operands[i].ndim, 1) - (len(inp) - len("..."))) > ell_longest: ell_longest = ell_count
           inputs[i] = inp.replace("...", ell_chars[-ell_count:])
@@ -2332,6 +2329,8 @@ class Tensor(MathTrait):
 
     NOTE: unlike PyTorch, this implementation is not limited to only 2d pooling and instead works for any number of dimensions.
 
+    See: https://paperswithcode.com/method/average-pooling
+
     ```python exec="true" source="above" session="tensor" result="python"
     t = Tensor.arange(25).reshape(1, 1, 5, 5)
     print(t.avg_pool2d().numpy())
@@ -2377,6 +2376,8 @@ class Tensor(MathTrait):
     When `return_indices` is set to `True`, the argmax will be returned along with the max values.
 
     NOTE: unlike PyTorch, this implementation is not limited to only 2d pooling and instead works for any number of dimensions.
+
+    See: https://paperswithcode.com/method/max-pooling
 
     ```python exec="true" source="above" session="tensor" result="python"
     t = Tensor.arange(25).reshape(1, 1, 5, 5)
@@ -3006,6 +3007,8 @@ class Tensor(MathTrait):
     """
     Applies the Rectified Linear Unit (ReLU) function element-wise.
 
+    - Described: https://paperswithcode.com/method/relu
+
     ```python exec="true" source="above" session="tensor" result="python"
     print(Tensor([-3., -2., -1., 0., 1., 2., 3.]).relu().numpy())
     ```
@@ -3042,6 +3045,7 @@ class Tensor(MathTrait):
     Applies the Hardsigmoid function element-wise.
     NOTE: default `alpha` and `beta` values are taken from torch
 
+    - Described: https://paperswithcode.com/method/hard-sigmoid
     - See: https://pytorch.org/docs/stable/generated/torch.nn.functional.hardsigmoid.html
 
     ```python exec="true" source="above" session="tensor" result="python"
@@ -3284,6 +3288,7 @@ class Tensor(MathTrait):
     """
     Applies the Exponential Linear Unit (ELU) function element-wise.
 
+    - Described: https://paperswithcode.com/method/elu
     - Paper: https://arxiv.org/abs/1511.07289v5
 
     ```python exec="true" source="above" session="tensor" result="python"
@@ -3296,6 +3301,7 @@ class Tensor(MathTrait):
     """
     Applies the Continuously differentiable Exponential Linear Unit (CELU) function element-wise.
 
+    - Described: https://paperswithcode.com/method/celu
     - Paper: https://arxiv.org/abs/1704.07483
 
     ```python exec="true" source="above" session="tensor" result="python"
@@ -3308,6 +3314,7 @@ class Tensor(MathTrait):
     """
     Applies the Scaled Exponential Linear Unit (SELU) function element-wise.
 
+    - Described: https://paperswithcode.com/method/selu
     - Paper: https://arxiv.org/abs/1706.02515v5
 
     ```python exec="true" source="above" session="tensor" result="python"
@@ -3332,6 +3339,7 @@ class Tensor(MathTrait):
     """
     Applies the Sigmoid Linear Unit (SiLU) function element-wise.
 
+    - Described: https://paperswithcode.com/method/silu
     - Paper: https://arxiv.org/abs/1606.08415
 
     ```python exec="true" source="above" session="tensor" result="python"
@@ -3344,6 +3352,7 @@ class Tensor(MathTrait):
     """
     Applies the ReLU6 function element-wise.
 
+    - Described: https://paperswithcode.com/method/relu6
     - Paper: https://arxiv.org/abs/1704.04861v1
 
     ```python exec="true" source="above" session="tensor" result="python"
@@ -3356,6 +3365,7 @@ class Tensor(MathTrait):
     """
     Applies the Hardswish function element-wise.
 
+    - Described: https://paperswithcode.com/method/hard-swish
     - Paper: https://arxiv.org/abs/1905.02244v5
 
     ```python exec="true" source="above" session="tensor" result="python"
@@ -3440,6 +3450,8 @@ class Tensor(MathTrait):
     """
     Applies the Hardtanh function element-wise.
 
+    - Described: https://paperswithcode.com/method/hardtanh-activation
+
     ```python exec="true" source="above" session="tensor" result="python"
     print(Tensor([-1.5, -1.0, -0.5, 0., 0.5, 1.0, 1.5]).hardtanh().numpy())
     ```
@@ -3464,6 +3476,7 @@ class Tensor(MathTrait):
     """
     Applies the Gaussian Error Linear Unit (GELU) function element-wise.
 
+    - Described: https://paperswithcode.com/method/gelu
     - Paper: https://arxiv.org/abs/1606.08415v5
 
     ```python exec="true" source="above" session="tensor" result="python"
@@ -3476,6 +3489,8 @@ class Tensor(MathTrait):
     """
     Applies the Sigmoid GELU approximation element-wise.
 
+    - Described: https://paperswithcode.com/method/gelu
+
     ```python exec="true" source="above" session="tensor" result="python"
     print(Tensor([-3., -2., -1., 0., 1., 2., 3.]).quick_gelu().numpy())
     ```
@@ -3485,6 +3500,8 @@ class Tensor(MathTrait):
   def leaky_relu(self, neg_slope=0.01) -> Tensor:
     """
     Applies the Leaky ReLU function element-wise.
+
+    - Described: https://paperswithcode.com/method/leaky-relu
 
     ```python exec="true" source="above" session="tensor" result="python"
     print(Tensor([-3., -2., -1., 0., 1., 2., 3.]).leaky_relu().numpy())
@@ -3499,6 +3516,7 @@ class Tensor(MathTrait):
     """
     Applies the Mish function element-wise.
 
+    - Described: https://paperswithcode.com/method/mish
     - Paper: https://arxiv.org/abs/1908.08681v3
 
     ```python exec="true" source="above" session="tensor" result="python"
@@ -3511,6 +3529,8 @@ class Tensor(MathTrait):
     """
     Applies the Softplus function element-wise.
 
+    - Described: https://paperswithcode.com/method/softplus
+
     ```python exec="true" source="above" session="tensor" result="python"
     print(Tensor([-3., -2., -1., 0., 1., 2., 3.]).softplus().numpy())
     ```
@@ -3520,6 +3540,8 @@ class Tensor(MathTrait):
   def softsign(self) -> Tensor:
     """
     Applies the Softsign function element-wise.
+
+    - Described: https://paperswithcode.com/method/softsign
 
     ```python exec="true" source="above" session="tensor" result="python"
     print(Tensor([-3., -2., -1., 0., 1., 2., 3.]).softsign().numpy())
@@ -3536,8 +3558,7 @@ class Tensor(MathTrait):
     # for each dimension, check either dim is 1, or it does not change
     if not all(resolve(s == ns) or resolve(s == 1) for s,ns in zip(shape, new_shape)):
       raise ValueError(f"cannot broadcast {self.shape} to {new_shape=}")
-    # NOTE: this cast is no-op in forward and uses sum_acc_dtype in the backward sum
-    return self.reshape(shape).cast(sum_acc_dtype(self.dtype))._apply_uop(UOp.expand, arg=new_shape).cast(self.dtype)
+    return self.reshape(shape)._apply_uop(UOp.expand, arg=new_shape)
 
   def _broadcasted(self, y:Tensor|ConstType|UOp, reverse:bool=False, match_dtype:bool=True) -> tuple[Tensor, Tensor]:
     x: Tensor = self
@@ -3814,6 +3835,7 @@ class Tensor(MathTrait):
     """
     Applies Layer Normalization over a mini-batch of inputs.
 
+    - Described: https://paperswithcode.com/method/layer-normalization
     - Paper: https://arxiv.org/abs/1607.06450v1
 
     ```python exec="true" source="above" session="tensor" result="python"
@@ -3832,6 +3854,7 @@ class Tensor(MathTrait):
     """
     Applies Batch Normalization over a mini-batch of inputs.
 
+    - Described: https://paperswithcode.com/method/batch-normalization
     - Paper: https://arxiv.org/abs/1502.03167
 
     ```python exec="true" source="above" session="tensor" result="python"
@@ -3856,6 +3879,7 @@ class Tensor(MathTrait):
 
     NOTE: dropout is only applied when `Tensor.training` is `True`.
 
+    - Described: https://paperswithcode.com/method/dropout
     - Paper: https://jmlr.org/papers/v15/srivastava14a.html
 
     ```python exec="true" source="above" session="tensor" result="python"
@@ -3897,6 +3921,7 @@ class Tensor(MathTrait):
     Computes scaled dot-product attention.
     `self` is the query tensor, `key` is the key tensor, and `value` is the value tensor.
 
+    - Described: https://paperswithcode.com/method/scaled
     - Paper: https://arxiv.org/abs/1706.03762v7
 
     ```python exec="true" source="above" session="tensor" result="python"
@@ -4089,8 +4114,8 @@ class Tensor(MathTrait):
     #extract singular values and sort. construct U from Q
     S, indices = U.square().sum(-2).sqrt().sort(dim = -1, descending=True)
     new_indices = Tensor.arange(num).reshape((1,) * (self.ndim - 1) + (num,)).expand(b_shape + 2 * (num,)).contiguous()
-    new_indices[..., :num] = indices.reshape(b_shape + (1,) + (num,)).expand(b_shape + 2 * (num,))
-    U,V = U.gather(-1, new_indices[...,0:num,0:num]) / S.unsqueeze(-2), V.gather(-1, new_indices[..., 0:num, 0:num]).realize()
+    new_indices[..., :num] = indices.reshape(b_shape + (1,) + (U.shape[0],)).expand(b_shape + 2 * (num,))
+    U,V = U.gather(-1, new_indices[...,0:num,0:num]) / S.unsqueeze(-2), V.gather(-1, new_indices[..., 0:num, 0:num])
 
     padded_u = Tensor.eye(q_num, dtype = U.dtype).reshape((1,) * (self.ndim - 2) + 2 * (q_num,)).expand(b_shape + 2 * (q_num,)).contiguous()
     padded_u[..., 0:num, 0:num] = U
@@ -4287,11 +4312,6 @@ class Tensor(MathTrait):
     ```
     """
     return self.cast(dtypes.bool)
-
-  def bfloat16(self) -> Tensor: return self.cast(dtypes.bfloat16)
-  def double(self) -> Tensor: return self.cast(dtypes.double)
-  def long(self) -> Tensor: return self.cast(dtypes.long)
-  def short(self) -> Tensor: return self.cast(dtypes.short)
 
   # *** image Tensor function replacements ***
 

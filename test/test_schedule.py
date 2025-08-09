@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 import functools
 from typing import cast
-from hypothesis import assume, given, settings, strategies as strat
+from hypothesis import assume, given, strategies as strat
 
 from tinygrad import nn, dtypes, Device, Tensor
 from tinygrad.device import is_dtype_supported
@@ -16,7 +16,7 @@ from tinygrad.uop.ops import PatternMatcher, UOp, Ops, GroupOp, UPat, graph_rewr
 from tinygrad.uop.symbolic import symbolic_simple
 from tinygrad.helpers import CI, DEBUG, FUSE_ARANGE, SPLIT_REDUCEOP, GlobalCounters, Context, getenv, all_same, temp
 from tinygrad.schedule.kernelize import merge_views, get_kernelize_map, Kernel
-from tinygrad.engine.schedule import create_schedule_with_vars
+from tinygrad.engine.schedule import ScheduleItem, create_schedule_with_vars
 from tinygrad.engine.realize import CompiledRunner, run_schedule, lower_schedule
 
 class KernelCountException(Exception): pass
@@ -151,7 +151,6 @@ class TestSchedule(unittest.TestCase):
       self.assertEqual(root.item(), sum(range(N)))
 
   @given(strat.sampled_from(range(2,4)), strat.sampled_from(range(2,4)), strat.sampled_from(range(0,4)), strat.sampled_from(range(0,4)))
-  @settings(deadline=None)
   def test_indexing_scalars(self, x, y, a, b):
     assume(a<x and b<y)
     X = Tensor.randn(x, y).realize()
@@ -1354,7 +1353,8 @@ class TestSchedule(unittest.TestCase):
     r = a.sum(0) + 6
     b = r.sum(0) * 4
     c = r.sum(1) * 2
-    check_schedule([b, c], 3)
+    schedule = check_schedule([b, c], 3)
+    self.assertIs(store_val(schedule[0]).op, Ops.ADD)
 
   def test_multireduce_simple_chase(self):
     Tensor.manual_seed(0)
@@ -1376,7 +1376,8 @@ class TestSchedule(unittest.TestCase):
     r = a.sum(2) + b
     d = r.T * 4
     e = r * d
-    check_schedule([d, e], 3)
+    schedule = check_schedule([d, e], 3)
+    self.assertIs(store_val(schedule[0]).op, Ops.ADD)
 
   def test_multireduce_push_permute_chase(self):
     Tensor.manual_seed(0)
@@ -1386,6 +1387,7 @@ class TestSchedule(unittest.TestCase):
     d = r.T * 4
     e = r * (d + a).sum(2)
     schedule = check_schedule([d, e], 3) # make sure it doesn't fuse
+    self.assertIs(store_val(schedule[0]).op, Ops.ADD)
     run_schedule(schedule)
     np.testing.assert_allclose(d.numpy(), (a.numpy().sum(2) + b.numpy()).T * 4, atol=1e-4, rtol=1e-4)
     np.testing.assert_allclose(e.numpy(), (a.numpy().sum(2) + b.numpy()) * (d.numpy() + a.numpy()).sum(2), atol=1e-4, rtol=1e-4)
@@ -1396,7 +1398,8 @@ class TestSchedule(unittest.TestCase):
     c = Tensor.empty(16, )
     r = a.sum(1) + c
     d = r[:4] * b
-    check_schedule(d, 2)
+    schedule = check_schedule(d, 2)
+    self.assertIs(store_val(schedule[0]).op, Ops.ADD)
 
   def test_multireduce_push_shrink_chase(self):
     Tensor.manual_seed(0)
@@ -1408,13 +1411,15 @@ class TestSchedule(unittest.TestCase):
     out = r[:4] * b + d.sum(1)[:4]
     # schedule = check_schedule(out, 2)
     schedule = check_schedule(out, 3)
+    self.assertIs(store_val(schedule[0]).op, Ops.ADD)
     run_schedule(schedule)
     np.testing.assert_allclose(out.numpy(), (a.numpy().sum(1) + c.numpy())[:4] * b.numpy() + d.numpy().sum(1)[:4], atol=1e-4, rtol=1e-4)
 
   def test_midreduce_nochase(self):
     a = Tensor.empty(16, 16)
     b = (a.sum(0) + a.max(1)) + 2
-    check_schedule(b, 2)
+    schedule = check_schedule(b, 2)
+    self.assertIs(store_val(schedule[0]).op, Ops.REDUCE_AXIS)
 
   def test_multireduce_midreduce_nochase(self):
     Tensor.manual_seed(0)
@@ -1422,6 +1427,7 @@ class TestSchedule(unittest.TestCase):
     b = (a.sum(0)+a.max(0) + a.max(1)+a.sum(1)) + 2
     # schedule = check_schedule(b, 2)
     schedule = check_schedule(b, 4)
+    self.assertIs(store_val(schedule[0]).op, Ops.REDUCE_AXIS)
     run_schedule(schedule)
     np.testing.assert_allclose(b.numpy(), a.numpy().sum(0)+a.numpy().max(0) + a.numpy().max(1)+a.numpy().sum(1)+2, atol=1e-4, rtol=1e-4)
 
@@ -1896,6 +1902,8 @@ class TestIndexing(unittest.TestCase):
     a = Tensor.arange(4).reshape(2, 2, 1).expand(2, 2, 2).contiguous().to("CPU")
     sched = self.check_schedule(a, 2) # NOTE: there is a contiguous between REDUCE_AXIS and COPY
     self.assertIs(sched[2].ast.op, Ops.COPY)
+    self.assertIs(store_val(sched[1]).op, Ops.LOAD)
+    self.assertIs(store_val(sched[0]).op, Ops.ADD)
     np.testing.assert_equal(a.numpy(), [[[0, 0], [1, 1]], [[2, 2], [3, 3]]])
 
   @unittest.skipUnless(is_dtype_supported(dtypes.half), "need half")
@@ -1978,6 +1986,24 @@ class TestIndexing(unittest.TestCase):
     new_uop = a.reshape(4,1).realize().uop
     self.assertEqual(new_uop.st, ShapeTracker.from_shape((4,)).reshape((4, 1)))
     self.assertEqual(swizzle_cnt(new_uop), 0)
+
+  def test_no_rewrite_elementwise(self):
+    a = Tensor.empty(32, 32)
+    b = Tensor.empty(32, 32)
+    sink = (a+b).schedule()[0].ast
+    self.assertEqual(swizzle_cnt(sink), 0)
+
+  def test_simple_store_reshape(self):
+    a = Tensor.empty(32, 32).sum(axis=1)+Tensor.empty(1,32)
+    ast = a.schedule()[0].ast
+    self.assertEqual(ast.shape, (32, 1))
+    self.assertEqual(a.uop.shape, (1, 32))
+
+  def test_no_reshape_reduceop(self):
+    a = Tensor.empty(32, 32).sum(axis=(1,)).contiguous()
+    ast = a.schedule()[0].ast
+    self.assertEqual(ast.shape, (32, 1))
+    self.assertEqual(a.uop.shape, (32,))
 
 def swizzle_cnt(u:UOp) -> int:
   return len([x for x in u.toposort() if x.op is Ops.VIEW and len(x.src) != 0 and x.src[0].op not in {Ops.BUFFER, Ops.DEFINE_GLOBAL, Ops.ASSIGN}])
@@ -2066,6 +2092,7 @@ class TestSwizzle(unittest.TestCase):
     np.testing.assert_allclose(t.numpy(), x.numpy().sum(axis=1)+y.numpy().sum(axis=1), atol=1e-6, rtol=1e-3)
 
   # kernels can only have 1 or n in each dim
+  @unittest.expectedFailure
   def test_dont_parallelize_different_n(self):
     Tensor.manual_seed(0)
     x = Tensor.randn(4, 2, 2).realize()
@@ -2081,6 +2108,7 @@ class TestSwizzle(unittest.TestCase):
     run_schedule(check_schedule(t, 3))
     np.testing.assert_equal(t.numpy(), [[0.5, 0.5], [0.5, 0.5], [0., 0.]])
 
+def store_val(si:ScheduleItem): return si.ast.src[0].src[1]
 zero_pm = UPat(Ops.CONST, arg=0)
 class TestView(unittest.TestCase):
   def test_all_masked_out(self):
@@ -2089,6 +2117,7 @@ class TestView(unittest.TestCase):
     # all masked out, degrades to const 0
     b = a.pad(((0, 10), None))[10:]
     sched = check_schedule(b.contiguous(), 1)
+    assert zero_pm.match(store_val(sched[-1]), {})
     run_schedule(sched)
     np.testing.assert_equal(b.numpy(), 0)
 
@@ -2099,6 +2128,7 @@ class TestView(unittest.TestCase):
     assert b.shape == (10, 10)
     sched = check_schedule(b.contiguous(), 1)
     self.assertEqual(sched[-1].ast.full_shape, (10, 10))
+    assert zero_pm.match(store_val(sched[-1]), {})
     run_schedule(sched)
     np.testing.assert_equal(b.numpy(), 0)
 
@@ -2113,6 +2143,8 @@ class TestView(unittest.TestCase):
     b = a.pad(((0, 5), None))[5:]
     assert b.shape == (10, 10)
     sched = check_schedule(b.contiguous(), 1)
+    self.assertEqual(store_val(sched[-1]).op, Ops.LOAD)
+    self.assertEqual(store_val(sched[-1]).st_arg, b.uop.st)
     run_schedule(sched)
     np.testing.assert_allclose(b.numpy(), np.pad(a.numpy(), ((0, 5), (0, 0)))[5:])
 
@@ -2227,6 +2259,24 @@ class TestConst(unittest.TestCase):
     a = Tensor.ones((4,)).contiguous()
     sched = a.schedule()
     self.assertEqual(len(sched), 1)
+
+  def test_const_ast(self):
+    a = Tensor.ones((4,)).pad((1, 1)).contiguous()
+    sched = a.schedule()
+    print(sched[0].ast)
+    const_ast_pattern = UPat(Ops.SINK, src=(UPat.store(UPat(), UPat.where(UPat(Ops.VALID), UPat.cvar("x"), UPat(Ops.CONST, arg=0))),))
+    self.assertEqual(len(const_ast_pattern.match(sched[0].ast, {})), 1)
+    run_schedule(sched)
+    self.assertListEqual(a.tolist(), [0, 1, 1, 1, 1, 0])
+
+  def test_unmasked_const_ast(self):
+    a = Tensor.ones((4,)).contiguous()
+    sched = a.schedule()
+    print(sched[0].ast)
+    const_ast_pattern = UPat(Ops.SINK, src=(UPat.store(UPat(), UPat(Ops.CONST)),))
+    self.assertEqual(len(const_ast_pattern.match(sched[0].ast, {})), 1)
+    run_schedule(sched)
+    self.assertListEqual(a.tolist(), [1, 1, 1, 1])
 
   # ** part 2: scheduler behavior when const folding happens later
 
